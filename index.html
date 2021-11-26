@@ -1,0 +1,1618 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+	<title>three.js webgl - loaders - MMD loader</title>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+	<link type="text/css" rel="stylesheet" href="main.css">
+</head>
+
+<body class="d-flex row-direction">
+	<div class="mask">
+		<h1 style="color:white;margin:15px">Loading...0%</h1>
+	</div>
+	<div id="info">
+		<p>控制面板說明<p>
+		<p>pointer mode-調整人物位置/select mode-拖移選取眼睛位置/eyePos mode-拖移調整瞳孔方向</p>
+		<p>tools-upload:導入設定文件/tools-download:下載設定文件</p>
+	</div>
+
+	<div id="main"></div>
+	<div class="grid4">
+		<div class="map"></div>
+		<div class="map"></div>
+		<div class="map"></div>
+		<div class="map"></div>
+	</div>
+
+
+	<script src="threejs/js/libs/ammo.wasm.js"></script>
+	<script src="scoreoutputer.min.js"></script>
+	<script>
+		// 建構子 ScoreOutputer 接受一個字串，該字串為 csv 的檔案名稱
+		// 以下面範例，檔名就為 "109598105(總分: 6).csv"
+		var so = new ScoreOutputer("109598067");
+		so.installCSS(function () {
+			// 安裝 bootstrap 的 css，如果在 html 上方引用 bootstrap 5.1.1 的話就不用使用 installCSS ，注意一定要 bootstrap css 5.1.1 版
+			// installCSS 接收一個 callback 當作參數，作為成功安裝 bootstrap css 的回呼函式
+
+			//加入項目，分數，完成狀況
+			//第一個參數為 項目名稱
+			//第2個參數為 項目分數
+			//第3個參數為 完成狀況，有完成 true/未完成 false
+			//有幾個項目就呼叫幾個 addChild
+			//addChild 要比 renderModal 先呼叫
+            so.addChild("產生 42 個參數的 gui", 4, true);
+            so.addChild("按 A 鍵切換為上一隻、按 D 鍵為下一隻 ( gui 跟角色要同時切換 )", 4, true);
+            so.addChild("讀取作業 3 與 作業 4 儲存的 label 表將可控制的 Morph 生成在右邊的 gui", 2, true);
+
+			//產生自評表，參數如下所示
+			so.renderModal(
+				//1. 自評表插入位置 (預設 document.body)
+				document.body,
+				//2. 自評表背景 (預設紅色)
+				'rgba(100,45,58,1)',
+				//3. 自評表文字顏色 (預設白色)
+				'white',
+				//4. 自評表文字大小 (預設 14pt)
+				'15pt',
+				//5. 自評表 checkbox 文字大小 (預設多少忘了)
+				'15px',
+				//6. 自評表標題 (預設 "自我評分表")
+				dialogTitle = "自我評分表"
+			);
+
+			//設定下載按鈕 <-- 一定要呼叫這個函數，不然沒有下載功能
+			so.installDownloadBtn();
+
+			//產生 "開啟自評表按鈕"
+			so.renderBtn(
+				//自評表按鈕插入位置
+				document.querySelector("#info"),
+				//自評表按鈕文字
+				"開啟自評表"
+			);
+		});
+	</script>
+	<script type="module">
+
+		import * as THREE from './build/three.module.js';
+		import { GUI } from './threejs/jsm/libs/dat.gui.module.js';
+		import { OrbitControls } from './threejs/jsm/controls/OrbitControls.js';
+		import { OutlineEffect } from './threejs/jsm/effects/OutlineEffect.js';
+		import { MMDLoader } from './threejs/jsm/loaders/MMDLoader.js';
+		import { MMDAnimationHelper } from './threejs/jsm/animation/MMDAnimationHelper.js';
+
+		const scale = 30;
+        const rad = Math.PI / 180
+
+		let camera, scene, renderer, effect, lineGroup, cameracontrols
+		let mesh, helper, center;
+
+        let irisData = { vrbtm:0, vrtop:0, vlbtm:0, vltop:0, hrrgt:0, hrlft:0, hlrgt:0}
+        let lPos = { v0: new THREE.Vector3(), v1: new THREE.Vector3(), v2: new THREE.Vector3(),v3:new THREE.Vector3()}
+		let eyeSet = new Array(8).fill().map(x => new THREE.Vector3())
+		let mouse = new THREE.Vector2(0, 0)
+		let container = null
+		let maps = null
+		let iscopy = false
+
+		let rendermode = 0
+
+		let leye = new THREE.Vector3(0, 0, 0)
+		let reye = new THREE.Vector3(0, 0, 0)
+		let head = new THREE.Vector3(0, 0, 0)
+		let width = 0
+		let height = 0
+		let prepared = true
+		let bone0, bone1, headBone
+		let isleftEye = false
+
+		const vpds = [];
+
+		let tmpTarget = new THREE.Vector3(0, 0, 0)
+		let tmpZoom = 1
+		let savestate = () => {
+			tmpTarget.x = camera.position.x
+			tmpTarget.y = camera.position.y
+			//tmpTarget.z = camera.position.z
+			tmpZoom = camera.zoom
+		}
+
+		let restorestate = () => {
+			move2Target(tmpTarget, tmpZoom)
+		}
+
+        let dlMask = document.querySelector('.mask')
+
+		function move2Target(target = new THREE.Vector3(0, 0, 0), zoom = 1) {
+
+			if (target == null) {
+				return
+			}
+
+			camera.position.x = target.x
+			camera.position.y = target.y
+			camera.zoom = zoom
+			camera.updateProjectionMatrix()
+
+			cameracontrols.target.copy(target)
+			cameracontrols.update()
+		}
+
+		function getModelIndex(name) {
+
+			if (mesh == null) {
+				return -1
+			}
+
+			let bones = mesh.geometry.bones
+
+			for (let i = 0; i < bones.length; i++) {
+				if (bones[i].name == name) {
+					return i
+				}
+			}
+
+			return -1
+		}
+
+
+		function getModelPosition(name) {
+			let pos = new THREE.Vector3(0, 0, 0)
+			let newPos = new THREE.Vector3(0, 0, 0)
+
+			if (mesh == null) {
+				return pos
+			}
+
+			let bones = mesh.geometry.bones
+			let index = getModelIndex(name)
+
+			if (index == -1) {
+				return pos
+			}
+
+			let getBonePos = (index) => {
+				let bone = bones[index]
+				let pos = new THREE.Vector3(...(bone.pos))
+
+				while (bone.parent != -1) {
+					bone = bones[bone.parent]
+					pos.x += bone.pos[0]
+					pos.y += bone.pos[1]
+					pos.z += bone.pos[2]
+				}
+
+				return pos
+			}
+
+			pos.copy(getBonePos(index))
+
+			newPos = (getBonePos(index + 1))
+
+			pos.add(newPos).divideScalar(2)
+
+			return pos
+		}
+
+		function init() {
+
+
+			container = document.getElementById('main')
+
+			width = container.clientWidth
+			height = container.clientHeight
+
+			view[2].set(width / 2, 0, width / 4, height / 2)
+			view[3].set(width * 3 / 4, 0, width / 4, height / 2)
+			view[0].set(width / 2, height / 2, width / 4, height / 2)
+			view[1].set(width * 3 / 4, height / 2, width / 4, height / 2)
+
+			camera = new THREE.OrthographicCamera(width / scale / - 2, width / scale / 2, height / scale / 2, height / scale / - 2, 0.000001, 1000);
+			camera.position.z = 25;
+
+			// scene
+
+			scene = new THREE.Scene();
+			scene.background = new THREE.Color(0xffffff);
+
+			const ambient = new THREE.AmbientLight(0x666666);
+			scene.add(ambient);
+
+			const directionalLight = new THREE.DirectionalLight(0x887766);
+			directionalLight.position.set(- 1, 1, 1).normalize();
+			scene.add(directionalLight);
+
+			//
+			lineGroup = new THREE.Object3D()
+			scene.add(lineGroup)
+
+			renderer = new THREE.WebGLRenderer({ antialias: true });
+			//renderer.setPixelRatio(window.devicePixelRatio);
+			renderer.setSize(width, height);
+			container.appendChild(renderer.domElement);
+
+			window.addEventListener('resize', onWindowResize);
+			//鏡頭控制
+			cameracontrols = new OrbitControls(camera, renderer.domElement);
+			cameracontrols.minDistance = 10;
+			cameracontrols.maxDistance = 1000;
+			cameracontrols.enableRotate = false;
+
+			effect = new OutlineEffect(renderer);
+
+            function addLine(points, color, name) {
+                let obj = scene.getObjectByName(name)
+                let geometry, material
+
+                points[0].z = 0
+                points[1].z = 0
+
+                geometry = new THREE.BufferGeometry().setFromPoints(points)
+                if (obj == null) {
+
+                    material = new THREE.LineBasicMaterial({
+                        color: color,
+                        depthTest: false
+                    })
+
+                    let line = new THREE.Line(geometry, material)
+                    line.name = name
+                    lineGroup.add(line)
+                }
+                else {
+                    obj.geometry = geometry
+                }
+
+			}
+
+			// 4 Grid Maps
+			let updateBounding = (copy = iscopy, state = isleftEye) => {
+				let pos0 = lPos.v0.clone(),
+					pos1 = lPos.v1.clone(),
+					pos2 = lPos.v2.clone(),
+					pos3 = lPos.v3.clone()
+
+				let color0 = 0xff0000
+				let color1 = 0x00ff00
+				let name = 'l'
+
+				let process = () => {
+                    addLine([pos0, pos1], color0, name + '0')
+                    addLine([pos1, pos2], color1, name + '1')
+                    addLine([pos2, pos3], color0, name + '2')
+                    addLine([pos3, pos0], color1, name + '3')
+
+                    let start0 = pos0.clone()
+                    let start1 = pos1.clone()
+                    let step0 = (pos2.y - pos0.y) / 4
+                    let step1 = (pos3.y - pos1.y) / 4
+                    for (let i = 1; i < 4; i++) {
+                        start0.y += step0
+                        start1.y += step1
+                        addLine([start0, start1], color0, 'h' + name + i)
+                    }
+
+                    start0 = pos1.clone()
+                    start1 = pos2.clone()
+                    step0 = (pos3.x - pos1.x) / 8
+                    step1 = (pos0.x - pos2.x) / 8
+                    for (let i = 1; i < 8; i++) {
+                        start0.x += step0
+                        start1.x += step1
+                        addLine([start0, start1], color1, 'v' + name + i)
+                    }
+				}
+
+				if (!state) {
+                    pos0.x = -pos0.x
+                    pos1.x = -pos1.x
+                    pos2.x = -pos2.x
+                    pos3.x = -pos3.x
+                }
+
+				process()
+
+				if (copy) {
+                    color0 = 0xff00ff
+                    color1 = 0x00ffff
+					name = 'r'
+                    pos0.x = -pos0.x
+                    pos1.x = -pos1.x
+                    pos2.x = -pos2.x
+                    pos3.x = -pos3.x
+
+					process()
+                }
+			}
+
+			maps = document.getElementsByClassName('map')
+            let setMap = (i) => {
+                
+                maps[rendermode].style.border = '5px solid lightgrey'
+                rendermode = i
+				if (isleftEye) {
+                    maps[rendermode].style.border = '5px solid red'
+                }
+				else {                    
+                    maps[rendermode].style.border = '5px solid blue'
+				}
+
+
+                if (!prepared) {
+                    return
+                }
+
+                if (isleftEye) {
+                    move2Target(reye, 40)
+                }
+                else {
+                    move2Target(leye, 40)
+				}
+                updateBounding()
+				
+                render()
+            }
+			for (let i = 0; i < 4; i++) {
+
+				maps[i].addEventListener('click', () => {
+					if (i == rendermode) {
+						isleftEye = !isleftEye
+					}
+                    setMap(i)
+					
+				})
+			}
+
+			maps[0].click()
+
+
+
+			function onProgress(xhr) {
+
+				if (xhr.lengthComputable) {
+					
+					const percentComplete = xhr.loaded / xhr.total * 100;
+                    let percentRounded = Math.round(percentComplete, 2)
+                    console.log(percentRounded + '% downloaded');
+                    dlMask.children[0].innerText = 'Loading...' + percentRounded + '% downloaded'
+
+					if (percentRounded == 100) {
+                        dlMask.children[0].innerText = 'initializing...'
+                    }
+				}
+
+			}
+
+			const vpdFiles = [
+				'models/mmd/vpds/01.vpd',
+				'models/mmd/vpds/02.vpd',
+				'models/mmd/vpds/03.vpd',
+				'models/mmd/vpds/04.vpd',
+				'models/mmd/vpds/05.vpd',
+				'models/mmd/vpds/06.vpd',
+				'models/mmd/vpds/07.vpd',
+				'models/mmd/vpds/08.vpd',
+				//'models/mmd/vpds/09.vpd',
+				//'models/mmd/vpds/10.vpd',
+				'models/mmd/vpds/11.vpd'
+			];
+
+			helper = new MMDAnimationHelper();
+
+			const loader = new MMDLoader();
+
+			const morphConvertor = {
+                
+                ウィンク: ['eye_wink_left'],
+				ウィンク右: ['eye_wink_right'],
+                まばたき: ['eye_wink_left', 'eye_wink_right'],
+				笑い: ['eye_happy_wink_left', 'eye_happy_wink_right'],
+				なごみ: ['eye_relaxed_left', 'eye_relaxed_right'],
+                じと目: ['eye_unimpressed_left', 'eye_unimpressed_right'],
+				じと: ['eye_unimpressed_left', 'eye_unimpressed_right'],
+                下まつ毛上げ: ['eye_raised_lower_eyelid_left', 'eye_raised_lower_eyelid_right'],
+				下瞼上げ: ['eye_raised_lower_eyelid_left', 'eye_raised_lower_eyelid_right'],
+				びっくり: ['eye_surprised_left', 'eye_surprised_right'],
+				瞳小: ['iris_small_left', 'iris_small_right'],
+
+				困る: ['eyebrow_troubled_left', 'eyebrow_troubled_right'],
+				困り: ['eyebrow_troubled_left', 'eyebrow_troubled_right'],
+                困惑: ['eyebrow_troubled_left', 'eyebrow_troubled_right'],
+				eyebrowtroubled: ['eyebrow_troubled_left', 'eyebrow_troubled_right'],
+                怒る: ['eyebrow_angry_left', 'eyebrow_angry_right'],
+                怒り: ['eyebrow_angry_left', 'eyebrow_angry_right'],
+				eyebrowangry: ['eyebrow_angry_left', 'eyebrow_angry_right'],
+				真面目: ['eyebrow_serious_left', 'eyebrow_serious_right'],
+                にこり: ['eyebrow_happy_left', 'eyebrow_happy_right'],
+                にこ: ['eyebrow_happy_left', 'eyebrow_happy_right'],
+                にこっ: ['eyebrow_happy_left', 'eyebrow_happy_right'],
+				下: ['eyebrow_lowered_left', 'eyebrow_lowered_right'],
+				眉下: ['eyebrow_lowered_left', 'eyebrow_lowered_right'],
+				上: ['eyebrow_raised_left', 'eyebrow_raised_right'],
+                眉上: ['eyebrow_raised_left', 'eyebrow_raised_right'],
+                
+                あ: ['mouth_aaa'],
+                い: ['mouth_iii'],
+                う: ['mouth_uuu'],
+                え: ['mouth_eee'],
+				お: ['mouth_ooo'],
+				'▲': ['mouth_delta'],
+				'はんっ！': ['mouth_smirk'],
+                口角左上げ: ['mouth_raised_corner_left'],
+                口角右上げ: ['mouth_raised_corner_right'],
+				口角上げ: ['mouth_raised_corner_left', 'mouth_raised_corner_right'],
+				口角左下げ: ['mouth_lowered_corner_left'],
+                口角右下げ: ['mouth_lowered_corner_right'],
+				口角下げ: ['mouth_lowered_corner_left', 'mouth_lowered_corner_right'],
+			};
+ 
+			initGui();
+
+			let axis = new THREE.AxisHelper(200)
+			scene.add(axis)
+
+			function initGui() {
+				const controls = {}
+
+                const mgui = new GUI()
+				
+                const morphTools = mgui.addFolder('Morph Tools')
+				const remapMorph = mgui.addFolder('Standard Morph')
+				const morphControl = mgui.addFolder('Morph Control')
+                const irisControl = mgui.addFolder('Iris Control')
+
+				const gui = new GUI();
+				const characters = gui.addFolder('Characters')
+				const operations = gui.addFolder('Operations')
+				const tools = gui.addFolder('tools')
+				const poses = gui.addFolder('Poses');
+				const morphs = gui.addFolder('Morphs');
+
+				let dictionary = []
+
+                const func = {
+                    morph: -1,
+                    pointer: 0,
+                    select: 1,
+                    eyePos: 2
+                }
+
+				function getBaseName(s) {
+
+					return s.slice(s.lastIndexOf('/') + 1);
+
+				}
+
+				function initControls() {
+
+					controls.characters = 0;
+					controls.pose = -1;
+					controls.operation = -1;
+
+					controls.dictionary = {}
+					controls.vpd = {}
+
+					for (let i = 0; i < vpdFiles.length; i++) {
+
+						controls.vpd[getBaseName(vpdFiles[i])] = false;
+
+					}
+
+					controls.leftEye = function () {
+						move2Target(leye, 50)
+					}
+
+					controls.rightEye = function () {
+						move2Target(reye, 50)
+					}
+
+					controls.face = function () {
+						move2Target(head, 10)
+					}
+
+					controls.l2r = function () {
+						iscopy = true
+						updateBounding()
+					}
+
+					controls.origin = function () {
+						move2Target(center)
+					}
+
+					controls.download = function () {
+						if (mesh == null) {
+							return
+						}
+
+						let data = {
+							modellist: {
+								location: modelFile[controls.characters],
+								line_locationx_1: lPos.v0.x,
+                                line_locationy_1: lPos.v0.y,
+                                line_locationx_2: lPos.v1.x,
+                                line_locationy_2: lPos.v1.y,
+                                line_locationx_3: lPos.v2.x,
+                                line_locationy_3: lPos.v2.y,
+                                line_locationx_4: lPos.v3.x,
+                                line_locationy_4: lPos.v3.y,
+								RXNA: eyeSet[4],
+								LXNA: eyeSet[0],
+								RXPA: eyeSet[5],
+								LXPA: eyeSet[1],
+								RYNA: eyeSet[6],
+								LYNA: eyeSet[3],
+								RYPA: eyeSet[2],
+								LYPA: eyeSet[7]
+							}
+						}
+						let downloadLink = document.createElement('a')
+						let blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+						downloadLink.href = URL.createObjectURL(blob)
+						downloadLink.download = 'data'
+						downloadLink.click()
+					}
+
+					controls.standardlist = {
+                        eyebrow_troubled_left: -1, eyebrow_troubled_right: -1, eyebrow_angry_left: -1, eyebrow_angry_right: -1, eyebrow_serious_left: -1, eyebrow_serious_right: -1, eyebrow_happy_left: -1
+                        , eyebrow_happy_right: -1, eyebrow_lowered_left: -1, eyebrow_lowered_right: -1, eyebrow_raised_left: -1, eyebrow_raised_right: -1, eye_wink_left: -1
+                        , eye_wink_right: -1, eye_happy_wink_left: -1, eye_happy_wink_right: -1, eye_relaxed_left: -1, eye_relaxed_right: -1, eye_unimpressed_left: -1
+                        , eye_unimpressed_right: -1
+                        , eye_raised_lower_eyelid_left: -1, eye_raised_lower_eyelid_right: -1, eye_surprised_left: -1, eye_surprised_right: -1, iris_small_left: -1, iris_small_right: -1
+						, mouth_aaa: -1, mouth_iii: -1, mouth_uuu: -1, mouth_eee: -1, mouth_ooo: -1, mouth_delta: -1, mouth_smirk: -1, mouth_raised_corner_left: -1, mouth_raised_corner_right: -1, mouth_lowered_corner_left: -1, mouth_lowered_corner_right: -1
+					};
+
+                    controls.standardValues = {
+                        eyebrow_troubled_left: -1, eyebrow_troubled_right: -1, eyebrow_angry_left: -1, eyebrow_angry_right: -1, eyebrow_serious_left: -1, eyebrow_serious_right: -1, eyebrow_happy_left: -1
+                        , eyebrow_happy_right: -1, eyebrow_lowered_left: -1, eyebrow_lowered_right: -1, eyebrow_raised_left: -1, eyebrow_raised_right: -1, eye_wink_left: -1
+                        , eye_wink_right: -1, eye_happy_wink_left: -1, eye_happy_wink_right: -1, eye_relaxed_left: -1, eye_relaxed_right: -1, eye_unimpressed_left: -1
+                        , eye_unimpressed_right: -1
+                        , eye_raised_lower_eyelid_left: -1, eye_raised_lower_eyelid_right: -1, eye_surprised_left: -1, eye_surprised_right: -1, iris_small_left: -1, iris_small_right: -1
+                        , mouth_aaa: -1, mouth_iii: -1, mouth_uuu: -1, mouth_eee: -1, mouth_ooo: -1, mouth_delta: -1, mouth_smirk: -1, mouth_raised_corner_left: -1, mouth_raised_corner_right: -1, mouth_lowered_corner_left: -1, mouth_lowered_corner_right: -1
+					};
+
+					controls.irisValue = {
+                        iris_rotation_x: -1, iris_rotation_y: -1, head_x: -1, head_y: -1, head_z: -1
+                    }
+
+					controls.upload = function (evt) {
+						if (mesh == null) {
+							return
+						}
+
+						inputfile.click()
+					}
+
+					controls.morphUpload = function (evt) {
+						if (mesh == null) {
+							return
+						}
+
+						inputMorphfile.click()
+					}
+
+                    controls.irisUpload = function (evt) {
+                        if (mesh == null) {
+                            return
+                        }
+
+                        inputIrisfile.click()
+                    }
+
+                    controls.morphDownload = function () {
+                        let data = {}
+                        let order = 0
+                        for (let key in controls.standardlist) {
+                            data[order] = controls.standardlist[key]
+                            order++
+                        }
+
+                        let downloadLink = document.createElement('a')
+                        let blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })
+                        downloadLink.href = URL.createObjectURL(blob)
+                        downloadLink.download = 'data'
+                        downloadLink.click()
+					}
+
+					controls.morphPrint = function () {
+						let text = ''
+						for (let key in controls.standardlist) {
+                            text = text + key + ':' + controls.standardlist[key]+'\n'
+                        }
+						alert(text)
+						console.log(text)
+                    }
+
+					controls.autoIdentify = function () {
+						let skeys = Object.keys(controls.standardlist)
+                        let keys = Object.keys(dictionary)
+
+                        for (let i = 0; i < skeys.length; i++) {
+                            mgui.__folders['Standard Morph'].__controllers[i].setValue(-1)
+						}
+
+                        for (let i = 0; i < keys.length; i++) {
+                            let key = keys[i]
+
+							mesh.morphTargetInfluences[i] = controls.dictionary[key]
+                            let values = morphConvertor[key]
+
+							if (values != null) {
+                                values.forEach((v) => {
+                                    let index = skeys.findIndex(x => x == v)
+
+                                    mgui.__folders['Standard Morph'].__controllers[index].setValue(i)
+                                })
+                            }
+						}
+
+						initMorphControl()
+
+                    }
+				}
+
+
+                function initStdMorph() {
+
+                    while (remapMorph.__controllers.length > 0) {
+                        remapMorph.remove(remapMorph.__controllers[0])
+					}
+
+					for (let key in controls.standardlist) {
+						let m = remapMorph.add(controls.standardlist, key)
+						m.setValue(-1)
+					}
+				}
+
+				function initMorphControl(option = true) {
+
+                    while (morphControl.__controllers.length > 0) {
+                        morphControl.remove(morphControl.__controllers[0])
+					}
+
+					if (!option) {
+						return
+                    }
+
+					let pkey = -1
+                    for (let key in controls.standardValues) {
+                        if (controls.standardlist[key] == -1) {
+                            morphControl.add(controls.standardValues, key, -1, -1, 0)
+							pkey = key
+							continue
+						}
+
+                        if (controls.standardlist[key] == controls.standardlist[pkey]) {
+							morphControl.add(controls.standardValues, key, -1, -1, 0)
+                            pkey = key
+                            continue
+                        }
+
+                        let c = morphControl.add(controls.standardValues, key, 0, 1, 0.1)
+                        c.setValue(0)
+
+                        c.onChange(() => {
+  
+                            let m = controls.standardlist[key]
+                            let v = controls.standardValues[key]
+
+                            gui.__folders['Morphs'].__controllers[m].setValue(v)
+						})
+
+						pkey = key
+                    }
+				}
+
+				function initIrisControl(option = true){
+                    while (irisControl.__controllers.length > 0) {
+                        irisControl.remove(irisControl.__controllers[0])
+					}
+
+                    if (!option) {
+                        return
+                    }
+
+                    let c = irisControl.add(controls.irisValue, 'iris_rotation_x', -1, 1, 0.01)
+                    c.setValue(0)
+
+					c.onChange(() => {
+                        let key = 'iris_rotation_x'
+                        let value = controls.irisValue[key] 
+						if (value > 0) {
+							eyeSet[rendermode].x = irisData.vltop.x * value
+							eyeSet[rendermode + 4].x = irisData.vrtop.x * value
+						}
+						else {
+							eyeSet[rendermode].x = irisData.vlbtm.x * value * -1
+							eyeSet[rendermode + 4].x = irisData.vlbtm.x * value * -1
+						}
+                            
+					})
+
+                    c = irisControl.add(controls.irisValue, 'iris_rotation_y', -1, 1, 0.01)
+                    c.setValue(0)
+
+					c.onChange(() => {
+                        let key = 'iris_rotation_y'
+						let value = controls.irisValue[key]
+						if (value < 0) {
+							eyeSet[rendermode].y = irisData.hlrgt.y * value
+							eyeSet[rendermode + 4].y = irisData.hrrgt.y * value * -1
+                        }
+						else {
+							eyeSet[rendermode].y = irisData.hllft.y * value
+							eyeSet[rendermode + 4].y = irisData.hrlft.y * value * -1
+						}
+
+					})
+
+                    c = irisControl.add(controls.irisValue, 'head_x', -1, 1, 0.01)
+                    c.setValue(0)
+
+					c.onChange(() => {
+                        let key = 'head_x'
+						let value = controls.irisValue[key]
+                        headBone.rotation.x = value * 15 * rad
+
+					})
+
+					c = irisControl.add(controls.irisValue, 'head_y', -1, 1, 0.01)
+                    c.setValue(0)
+
+					c.onChange(() => {
+                        let key = 'head_y'
+                        let value = controls.irisValue[key]
+                        headBone.rotation.y = value * 15 *rad
+
+					})
+
+                    c = irisControl.add(controls.irisValue, 'head_z', -1, 1, 0.01)
+                    c.setValue(0)
+
+					c.onChange(() => {
+                        let key = 'head_z'
+                        let value = controls.irisValue[key]
+                        headBone.rotation.z = value * 15 * rad
+
+                    })
+                    
+                }
+
+				function initMorphTools() {
+					
+                    morphTools.add(controls, 'morphPrint').name('print')
+					morphTools.add(controls, 'morphUpload').name('morph upload')
+                    morphTools.add(controls, 'irisUpload').name('iris upload')
+                    morphTools.add(controls, 'morphDownload').name('morph download')
+                    morphTools.add(controls, 'autoIdentify').name('Auto Identify')
+                }
+
+                let setData = (data) => {
+                    
+                    lPos.v0.x = data.modellist.line_locationx_1
+                    lPos.v0.y = data.modellist.line_locationy_1
+                    lPos.v1.x = data.modellist.line_locationx_2
+                    lPos.v1.y = data.modellist.line_locationy_2
+                    lPos.v2.x = data.modellist.line_locationx_3
+                    lPos.v2.y = data.modellist.line_locationy_3
+                    lPos.v3.x = data.modellist.line_locationx_4
+                    lPos.v3.y = data.modellist.line_locationy_4
+
+					eyeSet[4].set(...Object.values(data.modellist.RXNA))
+                    eyeSet[0].set(...Object.values(data.modellist.LXNA))
+                    eyeSet[5].set(...Object.values(data.modellist.RXPA))
+                    eyeSet[1].set(...Object.values(data.modellist.LXPA))
+                    eyeSet[6].set(...Object.values(data.modellist.RYNA))
+                    eyeSet[3].set(...Object.values(data.modellist.LYNA))
+                    eyeSet[2].set(...Object.values(data.modellist.RYPA))
+                    eyeSet[7].set(...Object.values(data.modellist.LYPA))
+
+                    updateBounding()
+				}
+
+                let readLocalJson = () => {
+                    let xhr = new XMLHttpRequest()
+                    let url = './data.json'
+                    xhr.open('get', url)
+                    xhr.responseType = 'json'
+                    xhr.send()
+                    xhr.onload = () => {
+						let res = xhr.response
+                        setData(res)
+                    }
+                }
+
+                let inputfile = document.createElement('input')
+                inputfile.type = 'file'
+                inputfile.accept = '.json'
+                inputfile.addEventListener('change', (evt) => {
+
+                    let file = evt.target.files[0]
+                    if (file == null) {
+                        return
+                    }
+                    let fileReader = new FileReader()
+					fileReader.onload = () => {
+                        let data = JSON.parse(fileReader.result)
+                        setData(data)
+                    }
+                    fileReader.readAsText(file)
+				})
+
+                let inputMorphfile = document.createElement('input')
+                inputMorphfile.type = 'file'
+                inputMorphfile.accept = '.json'
+                inputMorphfile.addEventListener('change', (evt) => {
+
+                    let file = evt.target.files[0]
+                    if (file == null) {
+                        return
+                    }
+                    let fileReader = new FileReader()
+                    fileReader.onload = () => {
+						let data = JSON.parse(fileReader.result)
+
+                        for (let i = 0; i < mgui.__folders['Standard Morph'].__controllers.length; i++) {
+							mgui.__folders['Standard Morph'].__controllers[i].setValue(data[i])
+                        }
+
+                        initMorphControl()
+                    }
+                    fileReader.readAsText(file)
+				})
+
+                let inputIrisfile = document.createElement('input')
+                inputIrisfile.type = 'file'
+                inputIrisfile.accept = '.json'
+                inputIrisfile.addEventListener('change', (evt) => {
+					
+                    let file = evt.target.files[0]
+                    if (file == null) {
+                        return
+                    }
+                    let fileReader = new FileReader()
+                    fileReader.onload = () => {
+                        let data = JSON.parse(fileReader.result)
+
+                        irisData.vrbtm = data.modellist.RXNA
+                        irisData.vrtop = data.modellist.RXPA
+                        irisData.vlbtm = data.modellist.LXNA
+                        irisData.vltop = data.modellist.LXPA
+
+                        irisData.hrrgt = data.modellist.RYNA
+                        irisData.hrlft = data.modellist.RYPA
+                        irisData.hlrgt = data.modellist.LYNA
+                        irisData.hllft = data.modellist.LYPA
+
+                        initIrisControl()
+
+                    }
+                    fileReader.readAsText(file)
+                })
+
+				const modelFile = [
+					'models/mmd/kizunaai/kizunaai.pmx',
+					'models/mmd/kokoro/kokoro.pmx',
+					'models/mmd/有西/有西.pmx'
+				]
+
+				function initCharater() {
+					const kiaraList = {
+						kizunaAI: 0,
+						kokoro: 1,
+						物述有栖: 2
+					}
+
+					characters.add(controls, 'characters', kiaraList).onChange(onChangeCharacter)
+				}
+
+				function initOpertation() {
+
+
+					selectOperation.enable = false
+					renderer.domElement.addEventListener('mousedown', selectOperation.onMouseDown)
+					renderer.domElement.addEventListener('mousemove', selectOperation.onMouseMove)
+					renderer.domElement.addEventListener('mouseup', selectOperation.onMouseUp)
+					renderer.domElement.addEventListener('mouseleave', selectOperation.onMouseLeave)
+
+					eyeOperation.enable = false
+					renderer.domElement.addEventListener('mousedown', eyeOperation.onMouseDown)
+					renderer.domElement.addEventListener('mousemove', eyeOperation.onMouseMove)
+					renderer.domElement.addEventListener('mouseup', eyeOperation.onMouseUp)
+
+					renderer.domElement.addEventListener('mousemove', (evt) => {
+						let rect = renderer.domElement.getBoundingClientRect()
+						mouse.x = ((evt.clientX - rect.left) / width * 2) * 2 - 1
+						mouse.y = -((evt.clientY - rect.top) / height) * 2 + 1
+					})
+
+					renderer.domElement.addEventListener('contextmenu', (evt) => {
+						evt.preventDefault()
+					}, false)
+
+					let getOrder = (mode, eyeState) => {
+                        switch (mode) {
+							case 0:
+								return eyeState ? 0 : 1
+                                break
+                            case 1:
+                                return eyeState ? 2 : 3
+                                break
+                            case 2:
+                                return eyeState ? 4 : 6
+                                break
+                            case 3:
+                                return eyeState ? 7 : 5
+                        }
+					}
+
+					let setState = (order) => {
+						
+						switch (order) {
+                            case 0:
+                                isleftEye = true
+                                setMap(0)
+                                break
+                            case 1:
+                                isleftEye = false
+                                setMap(0)
+                                break
+                            case 2:
+                                isleftEye = true
+                                setMap(1)
+                                break
+                            case 3:
+                                isleftEye = false
+								setMap(1)
+                                break
+							case 4:
+                                isleftEye = true
+                                setMap(2)
+								break
+							case 5:
+                                isleftEye = false
+                                setMap(3)
+								break
+							case 6:
+                                isleftEye = false
+                                setMap(2)
+								break
+							case 7:
+                                isleftEye = true
+                                setMap(3)
+                                break
+                        }
+					}
+
+					let morphKey = (code) => {
+						if (code == 115 || code == 83) {
+							controls.morphDownload()
+						}
+						else if (code == 112 || code == 80) {
+							controls.morphPrint()
+                        }
+					}
+
+					let normalKey = (code) => {
+                        evt.preventDefault()
+                        if ((code == 113 || code == 81) && isleftEye) {
+                            eyeSet[rendermode].copy(eyeSet[rendermode + 4])
+                        }
+                        else if ((code == 113 || code == 81 )&& !isleftEye) {
+                            eyeSet[rendermode + 4].copy(eyeSet[rendermode])
+                        }
+                        else if (code == 97 || code == 65) {
+                            controls.characters = (controls.characters + modelFile.length - 1) % modelFile.length
+                            onChangeCharacter()
+                        }
+                        else if (code == 100 || code == 68) {
+                            controls.characters = (controls.characters + modelFile.length + 1) % modelFile.length
+                            onChangeCharacter()
+                        }
+                        else if (code == 49) {
+                            let order = getOrder(rendermode, isleftEye)
+                            setState((order + 7) % 8)
+                        }
+                        else if (code == 50) {
+                            let order = getOrder(rendermode, isleftEye)
+                            setState((order + 9) % 8)
+                        }
+                        else if (code == 115 || code == 83) {
+                            controls.download()
+                        }
+                    }
+
+					document.onkeypress = (evt) => {
+                        if (!prepared) {
+                            return
+						}
+
+						let code = evt.charCode
+						console.log(code)
+
+						if (controls.operation == func.morph) {
+							morphKey(code)
+						}
+						else {
+							normalKey(code)
+                        }
+					}
+
+					operations.add(controls, 'operation', func).onChange(onChangeOperation)
+				}
+
+				function initPoses() {
+
+					const files = { default: - 1 };
+
+					for (let i = 0; i < vpdFiles.length; i++) {
+
+						files[getBaseName(vpdFiles[i])] = i;
+
+					}
+
+					poses.add(controls, 'pose', files).onChange(onChangePose);
+
+				}
+
+				function initMorphs() {
+					//console.log(morphs.__controllers)
+
+					while (morphs.__controllers.length > 0) {
+						morphs.remove(morphs.__controllers[0])
+					}
+
+					let order = 0
+					for (const key in dictionary) {
+						let m = morphs.add(controls.dictionary, key, 0.0, 1.0, 0.01)
+						m.name(order + '.' + key)
+						m.onChange(onChangeMorph);
+						order++
+					}
+
+				}
+
+				function initTools() {
+
+					tools.add(controls, 'origin')
+					tools.add(controls, 'face')
+					tools.add(controls, 'leftEye')
+					tools.add(controls, 'rightEye')
+					tools.add(controls, 'l2r')
+					tools.add(controls, 'download')
+					tools.add(controls, 'upload')
+				}
+
+				let setMaskEnable = (option) => {
+
+					if (option) {
+                        dlMask.style.display = 'flex'
+					}
+					else {
+                        dlMask.style.display = 'none'
+					}
+				}
+
+				function onChangeCharacter() {
+					prepared = false
+					setMaskEnable(true)
+					loader.load(modelFile[controls.characters], function (object) {
+						if (mesh != null) {
+							scene.remove(mesh)
+						}
+
+						mesh = object;
+						mesh.geometry.computeBoundingBox()
+
+						center = new THREE.Vector3()
+						mesh.geometry.boundingBox.getCenter(center)
+						scene.add(mesh);
+
+						dictionary = mesh.morphTargetDictionary
+						controls.dictionary = {}
+						for (const key in dictionary) {
+							controls.dictionary[key] = 0.0;
+						}
+						//console.log(mesh)
+						initMorphControl(false)
+						initIrisControl(false)
+						initMorphs();
+                        initStdMorph()
+						onChangeMorph();
+						onChangePose();
+
+						leye = getModelPosition('左目')
+						reye = getModelPosition('右目')
+						head = getModelPosition('頭')
+						console.log(mesh.skeleton)
+						bone0 = mesh.skeleton.bones[getModelIndex('左目')]
+						bone1 = mesh.skeleton.bones[getModelIndex('右目')]
+                        headBone = mesh.skeleton.bones[getModelIndex('頭')]
+
+						let t = () => {
+							if (loader.meshBuilder.materialBuilder.process == 0) {
+								//finish loading
+								setMaskEnable(false)
+								prepared = true
+								isleftEye = false
+								maps[0].click()
+							}
+							else {
+								setTimeout(t, 100)
+							}
+						}
+						setTimeout(t, 100)
+
+					}, onProgress, null);
+				}
+
+				function initVpds() {
+					let vpdIndex = 0;
+					function loadVpd() {
+
+						const vpdFile = vpdFiles[vpdIndex];
+
+						loader.loadVPD(vpdFile, false, function (vpd) {
+
+							vpds.push(vpd);
+
+							vpdIndex++;
+
+							if (vpdIndex < vpdFiles.length) {
+
+								loadVpd();
+
+							}
+
+						}, onProgress, null);
+
+					}
+
+					loadVpd();
+				}
+
+				let startPos = new THREE.Vector2()
+				let endPos = new THREE.Vector2()
+				let raycaster = new THREE.Raycaster()
+				let result
+
+				raycaster.params.Line.threshold = 0.05
+				raycaster.linePrecision = 0.1
+
+				let selectOperation = {
+					mode: -1,
+					enable: false,
+					onMouseDown: (evt) => {
+						if (!selectOperation.enable) {
+							return
+						}
+
+						if (result != null) {
+							selectOperation.mode = 2
+						}
+						else {
+							selectOperation.mode = 0
+						}
+
+						startPos.copy(mouse)
+					},
+					onMouseMove: (evt) => {
+                        let lbox = { xmin: 0, xmax: 0, ymin: 0, ymax: 0 }
+
+						if (!selectOperation.enable) {
+							return
+						}
+
+						if (selectOperation.mode == -1) {
+							raycaster.setFromCamera(mouse, camera);
+
+							const intersects = raycaster.intersectObjects(lineGroup.children, true);
+
+							if (intersects.length > 0) {
+
+								result = intersects[0].object
+								if (result.name == 'l0' || result.name == 'l2') {
+									document.body.style.cursor = 'row-resize'
+								}
+								else if (result.name == 'l1' || result.name == 'l3') {
+									document.body.style.cursor = 'col-resize'
+								}
+
+							} else {
+								document.body.style.cursor = 'default'
+								result = null
+							}
+						}
+
+						else if (selectOperation.mode == 0) {
+							endPos.copy(mouse)
+
+							if (isleftEye) {
+                                lbox.xmin = Math.min(startPos.x, endPos.x)
+                                lbox.xmax = Math.max(startPos.x, endPos.x)
+                                lbox.ymin = Math.min(startPos.y, endPos.y)
+                                lbox.ymax = Math.max(startPos.y, endPos.y)
+							}
+							else {
+                                lbox.xmin = -Math.min(startPos.x, endPos.x)
+                                lbox.xmax = -Math.max(startPos.x, endPos.x)
+                                lbox.ymin = Math.min(startPos.y, endPos.y)
+                                lbox.ymax = Math.max(startPos.y, endPos.y)
+							}
+
+                            if (isleftEye) {
+                                lPos.v0.set(lbox.xmin, lbox.ymin, 0).unproject(camera)
+                                lPos.v1.set(lbox.xmax, lbox.ymin, 0).unproject(camera)
+                                lPos.v2.set(lbox.xmax, lbox.ymax, 0).unproject(camera)
+                                lPos.v3.set(lbox.xmin, lbox.ymax, 0).unproject(camera)
+                            }
+
+                            else {
+                                lPos.v0.set(lbox.xmin * -1, lbox.ymin, 0).unproject(camera)
+                                lPos.v1.set(lbox.xmax * -1, lbox.ymin, 0).unproject(camera)
+                                lPos.v2.set(lbox.xmax * -1, lbox.ymax, 0).unproject(camera)
+                                lPos.v3.set(lbox.xmin * -1, lbox.ymax, 0).unproject(camera)
+                            }
+
+							updateBounding()
+						}
+
+						else if (selectOperation.mode == 2) {
+
+							endPos.copy(mouse)
+							let tmp = new THREE.Vector3()
+
+							if (result.name == 'l0') {
+								lbox.ymin = endPos.y
+								tmp.set(0, lbox.ymin, 0).unproject(camera)
+								lPos.v0.y = tmp.y
+                                lPos.v1.y = tmp.y
+							}
+							else if (result.name == 'l1') {
+								lbox.xmax = endPos.x
+								tmp.set(lbox.xmax, 0, 0).unproject(camera)
+                                tmp.x = isleftEye ? tmp.x : -tmp.x
+                                lPos.v1.x = tmp.x
+                                lPos.v2.x = tmp.x
+							}
+							else if (result.name == 'l2') {
+								lbox.ymax = endPos.y
+								tmp.set(0, lbox.ymax, 0).unproject(camera)
+                                lPos.v2.y = tmp.y
+                                lPos.v3.y = tmp.y
+							}
+							else if (result.name == 'l3') {
+								lbox.xmin = endPos.x
+								tmp.set(lbox.xmin, 0, 0).unproject(camera)
+                                tmp.x = isleftEye ? tmp.x : -tmp.x
+								lPos.v0.x = tmp.x
+								lPos.v3.x = tmp.x
+							}
+							updateBounding()
+						}
+
+					},
+					onMouseUp: (evt) => {
+						if (!selectOperation.enable) {
+							return
+						}
+
+						document.body.style.cursor = 'default'
+						selectOperation.mode = -1
+
+					},
+					onMouseLeave: (evt) => {
+						if (!selectOperation.enable) {
+							return
+						}
+
+						document.body.style.cursor = 'default'
+
+					}
+				}
+
+				let eyeOperation = {
+					mode: -1,
+					enable: false,
+					onMouseDown: (evt) => {
+						if (!eyeOperation.enable) {
+							return
+						}
+
+						if (evt.button == 0 && evt.buttons == 1) {
+							eyeOperation.mode = 0
+						}
+
+						else if (evt.button == 2 && evt.buttons == 2) {
+							eyeOperation.mode = -1
+						}
+
+						startPos.copy(mouse)
+					},
+					onMouseMove: (evt) => {
+						if (!eyeOperation.enable) {
+							return
+						}
+
+						if (eyeOperation.mode == 0) {
+							endPos.copy(mouse)
+							let offsetPos = endPos.clone().sub(startPos)
+							let absX = Math.abs(offsetPos.x)
+							let absY = Math.abs(offsetPos.y)
+
+							let offset = isleftEye ? 4 : 0
+
+							if (absX > absY) {
+								eyeSet[rendermode + offset].x = 0
+                                eyeSet[rendermode + offset].y = offsetPos.x * 20
+							}
+							else if (absX < absY) {
+                                eyeSet[rendermode + offset].x = -offsetPos.y * 20
+								eyeSet[rendermode + offset].y = 0
+							}
+							else {
+								eyeSet[rendermode + offset].x = 0
+								eyeSet[rendermode + offset].y = 0
+							}
+						}
+					},
+					onMouseUp: (evt) => {
+					}
+				}
+
+				function onChangeOperation() {
+
+					switch (Number(controls.operation)) {
+						case func.morph:
+                            cameracontrols.enabled = true
+                            selectOperation.enable = false
+							eyeOperation.enable = false
+                            mgui.domElement.style.display = 'block'
+                            break
+                        case func.pointer:
+							cameracontrols.enabled = true
+							selectOperation.enable = false
+							eyeOperation.enable = false
+							mgui.domElement.style.display = 'none'
+							break
+                        case func.select:
+							cameracontrols.enabled = false
+							selectOperation.enable = true
+							eyeOperation.enable = false
+                            mgui.domElement.style.display = 'none'
+							break
+                        case func.eyePos:
+							cameracontrols.enabled = false
+							selectOperation.enable = false
+							eyeOperation.enable = true
+                            mgui.domElement.style.display = 'none'
+							break
+
+					}
+				}
+
+				function onChangeMorph() {
+
+					let keys = Object.keys(dictionary)
+
+					for (let i = 0; i < keys.length; i++) {
+						let key = keys[i]
+
+						mesh.morphTargetInfluences[i] = controls.dictionary[key]
+					}
+                } 
+
+				function onChangePose() {
+
+					const index = parseInt(controls.pose);
+
+					if (index === - 1) {
+
+						mesh.pose();
+
+					} else {
+
+						helper.pose(mesh, vpds[index]);
+
+					}
+				}
+				initControls();
+				initVpds()
+				initCharater()
+
+				initPoses();
+				initMorphs();
+                initStdMorph()
+				initOpertation();
+				initTools();
+                initMorphTools()
+
+				characters.open();
+				operations.open();
+				morphs.close();
+                remapMorph.close()
+                morphTools.open()
+				morphControl.open()
+				irisControl.open()
+
+				onChangeCharacter()
+				onChangeOperation()
+				readLocalJson()
+			}
+
+		}
+
+		let setCamera = (width, height) => {
+			camera.left = width / scale / - 2;
+			camera.right = width / scale / 2;
+			camera.top = height / scale / 2;
+			camera.bottom = height / scale / - 2;
+			camera.updateProjectionMatrix();
+		}
+
+		function onWindowResize() {
+			width = container.clientWidth
+			height = container.clientHeight
+
+			view[2].set(width / 2, 0, width / 4, height / 2)
+			view[3].set(width * 3 / 4, 0, width / 4, height / 2)
+			view[0].set(width / 2, height / 2, width / 4, height / 2)
+			view[1].set(width * 3 / 4, height / 2, width / 4, height / 2)
+
+			effect.setSize(width, height);
+
+			for (let i = 0; i < 4; i++) {
+				//let mapwidth = maps[i].clientWidth
+				//let mapheight = maps[i].clientHeight
+				//renderGroup[i].setSize(mapwidth, mapheight)
+			}
+		}
+
+		//
+
+		let setLineVisibility = (option) => {
+			for (let i = 0; i < lineGroup.children.length; i++) {
+				lineGroup.children[i].visible = option
+			}
+		}
+
+		let view = [
+			new THREE.Vector4(),
+			new THREE.Vector4(),
+			new THREE.Vector4(),
+			new THREE.Vector4()
+		]
+
+		function animate() {
+			render()
+			requestAnimationFrame(animate)
+		}
+
+		function render() {
+			
+
+			if (mesh != null && prepared) {
+
+                bone0.rotation.x = eyeSet[rendermode].x * rad
+                bone0.rotation.y = eyeSet[rendermode].y * rad
+                bone0.rotation.z = eyeSet[rendermode].z * rad
+
+                bone1.rotation.x = eyeSet[rendermode + 4].x * rad
+                bone1.rotation.y = eyeSet[rendermode + 4].y * rad
+                bone1.rotation.z = eyeSet[rendermode + 4].z * rad
+
+			}
+
+			setLineVisibility(true)
+			effect.setViewport(0, 0, width / 2, height)
+			effect.setScissor(0, 0, width / 2, height)
+			effect.setScissorTest(true)
+			setCamera(width / 2, height)
+			effect.render(scene, camera);
+
+			setLineVisibility(false)
+
+			savestate()
+			move2Target(head, 10)
+
+			for (let i = 0; i < 4; i++) {
+                
+				if (mesh != null) {
+					bone0.rotation.x = eyeSet[i].x * rad
+                    bone0.rotation.y = eyeSet[i].y * rad
+                    bone0.rotation.z = eyeSet[i].z * rad
+
+                    bone1.rotation.x = eyeSet[i + 4].x * rad
+                    bone1.rotation.y = eyeSet[i + 4].y * rad
+                    bone1.rotation.z = eyeSet[i + 4].z * rad
+				}
+
+
+				effect.setViewport(view[i])
+				effect.setScissor(view[i])
+				effect.setScissorTest(true)
+				//setCamera(view[i].z, view[i].w)
+
+				if (i == rendermode) {
+					setLineVisibility(true)
+
+				}
+				else {
+
+				}
+
+				effect.render(scene, camera);
+
+				setLineVisibility(false)
+			}
+
+			move2Target(leye, 40)
+			restorestate()
+		}
+
+		Ammo().then(function (AmmoLib) {
+
+			Ammo = AmmoLib;
+
+			init();
+			animate()
+			
+		});
+	</script>
+	<style>
+		body {
+			width: 100vw;
+			height: 100vh;
+			margin: 0;
+			padding: 0;
+		}
+
+		a {
+			color: #08f;
+		}
+
+		.map {
+			width: calc(50% - 0px);
+			height: calc(50% - 0px);
+			border: 5px solid lightgrey;
+		}
+
+		#main {
+			width: calc(100vw - 0px);
+			height: calc(100vh - 0px);
+			border: 5px solid lightgrey;
+		}
+
+        .mask {
+            width: 100vw;
+            height: 100vh;
+            background-color: rgba(0,0,0,0.5);
+            position: absolute;
+            left: 0px;
+            top: 0px;
+            display: none;
+            z-index: 3;
+            justify-content: center;
+            align-items: center;
+        }
+
+		.grid4 {
+			position: absolute;
+			display: flex;
+			flex-wrap: wrap;
+			left: 50vw;
+			height: 0px;
+			width: 50vw;
+			height: 100vh
+		}
+
+		.dg.a {
+			margin-right: 0px;
+			min-height:20px;
+		}
+	</style>
+</body>
+
+</html>
